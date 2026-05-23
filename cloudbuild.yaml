@@ -1,0 +1,200 @@
+# Cloud Build pipeline for the FastAPI employee portal.
+#
+# This file runs quality checks first, then builds and deploys the container.
+# The project uses uv for Python dependency management, so the Python steps use
+# the official uv image instead of pip commands.
+
+steps:
+  # Run a lint check and create an HTML report.
+  #
+  # allowFailure lets the next step inspect the exit code and upload the report
+  # before the build is marked as failed. Without this, Cloud Build would stop
+  # immediately and you would lose the lint artifact.
+  - name: "ghcr.io/astral-sh/uv:python3.12-bookworm"
+    id: "lint_test"
+    entrypoint: "bash"
+    env:
+      - "UV_CACHE_DIR=.uv-cache"
+      - "UV_TOOL_DIR=.uv-tools"
+    args:
+      - "-c"
+      - |
+        mkdir -p flake_reports
+        uv tool run --with flake8-html flake8 \
+          --exclude .git,.venv,.uv-cache,.uv-python,.uv-tools,.pytest_cache,__pycache__ \
+          --extend-ignore E501,E402,W292,E302 \
+          --format=html \
+          --htmldir=flake_reports/ \
+          . || lint_status=$?
+        echo "$${lint_status:-0}" > lint_exit_code.txt
+        echo "lint test exited with code $${lint_status:-0}"
+    allowFailure: true
+
+  # If lint failed, upload the HTML lint report to Cloud Storage and then fail.
+  #
+  # Change the bucket name below if your artifact bucket has a different name.
+  - name: "gcr.io/cloud-builders/gsutil"
+    id: "upload-lint-artifacts"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        lint_status=$(cat lint_exit_code.txt)
+        if [ "$lint_status" -ne 0 ]; then
+          echo "Lint failed (code: $lint_status). Uploading artifacts..."
+          gsutil cp -r flake_reports/* gs://emp-portal-artifact/
+          echo "Failing build because lint failed."
+          exit 1
+        else
+          echo "Lint succeeded."
+        fi
+    waitFor: ["lint_test"]
+
+  # Run the important pytest tests and create an HTML pytest report.
+  #
+  # uv sync --dev installs both normal dependencies and the dev dependency group
+  # from pyproject.toml / uv.lock. pytest-html is added only for this command so
+  # the project does not need to depend on it permanently.
+  - name: "ghcr.io/astral-sh/uv:python3.12-bookworm"
+    id: "pytest"
+    entrypoint: "bash"
+    env:
+      - "UV_CACHE_DIR=.uv-cache"
+    args:
+      - "-c"
+      - |
+        mkdir -p pytest_reports
+        uv sync --dev
+        uv run --with pytest-html pytest --html=pytest_reports/pytest-report.html --self-contained-html || pytest_status=$?
+        echo "$${pytest_status:-0}" > pytest_exit_code.txt
+        echo "pytest exited with code $${pytest_status:-0}"
+    allowFailure: true
+    waitFor: ["-"]
+
+  # If pytest failed, upload the HTML report and then fail the build.
+  - name: "gcr.io/cloud-builders/gsutil"
+    id: "upload-pytest-artifacts"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        pytest_status=$(cat pytest_exit_code.txt)
+        if [ "$pytest_status" -ne 0 ]; then
+          echo "Pytest failed (code: $pytest_status). Uploading artifacts..."
+          gsutil cp -r pytest_reports/* gs://emp-portal-artifact/
+          echo "Failing build because tests failed."
+          exit 1
+        else
+          echo "Pytest succeeded."
+        fi
+    waitFor: ["pytest"]
+
+  # Build the Docker image for the FastAPI app.
+  #
+  # This expects a Dockerfile at the project root. The image tag is built from
+  # the substitutions at the bottom of this file.
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build"
+    args: ["build", "-t", "${_IMAGE_PATH}", "."]
+
+  # Push the Docker image to Artifact Registry.
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push"
+    args: ["push", "${_IMAGE_PATH}"]
+    waitFor: ["build"]
+
+  # For feature branches, deploy a temporary Cloud Run service with the branch
+  # name. Example: feature-login becomes a Cloud Run service named feature-login.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "deploy_feature"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [[ "$BRANCH_NAME" =~ ^feature-.*$ ]]; then
+          gcloud run deploy "${BRANCH_NAME}" \
+            --image "${_IMAGE_PATH}" \
+            --region "${_DEPLOY_REGION}" \
+            --allow-unauthenticated
+        else
+          echo "Skipping feature deployment for branch: $BRANCH_NAME"
+        fi
+    waitFor: ["push"]
+
+  # Smoke test the feature Cloud Run service.
+  #
+  # Because this is a FastAPI app rendering the existing HTML templates, the
+  # check looks for text that should appear on the homepage.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "test_feature"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [[ "$BRANCH_NAME" =~ ^feature-.*$ ]]; then
+          service_url=$(gcloud run services describe "${BRANCH_NAME}" \
+            --region "${_DEPLOY_REGION}" \
+            --format="value(status.url)")
+
+          curl -fsS "$service_url" | grep "Employee Data" \
+            && echo "Feature smoke test passed." \
+            || (echo "Feature smoke test failed." && exit 1)
+        else
+          echo "Skipping feature smoke test for branch: $BRANCH_NAME"
+        fi
+    waitFor: ["deploy_feature"]
+
+  # On main, register or update the Cloud Deploy pipeline definition.
+  #
+  # This expects deploy/clouddeploy.yaml to exist. If you are not using Cloud
+  # Deploy yet, remove this step and the create_release step below.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "register_pipeline"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [[ "$BRANCH_NAME" == "main" ]]; then
+          gcloud deploy apply \
+            --file=./deploy/clouddeploy.yaml \
+            --region="${_DEPLOY_REGION}" \
+            --project="$PROJECT_ID"
+        else
+          echo "Skipping Cloud Deploy pipeline registration for branch: $BRANCH_NAME"
+        fi
+    waitFor: ["push"]
+
+  # On main, create a Cloud Deploy release from the image that was just pushed.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create_release"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [[ "$BRANCH_NAME" == "main" ]]; then
+          gcloud deploy releases create "emp-portal-$SHORT_SHA" \
+            --delivery-pipeline="emp-portal-pipeline" \
+            --region="${_DEPLOY_REGION}" \
+            --images="app-image=${_IMAGE_PATH}"
+        else
+          echo "Skipping Cloud Deploy release for branch: $BRANCH_NAME"
+        fi
+    waitFor: ["register_pipeline"]
+
+substitutions:
+  # Artifact Registry Docker host for europe-west4.
+  _LOCATION: "europe-west4-docker.pkg.dev"
+
+  # Repository/image name inside Artifact Registry.
+  _IMAGE: "emp-portal-repo/emp-portal-image"
+
+  # Full Docker image path, including the branch name as the tag.
+  _IMAGE_PATH: "${_LOCATION}/${PROJECT_ID}/${_IMAGE}:${BRANCH_NAME}"
+
+  # Cloud Run and Cloud Deploy region.
+  _DEPLOY_REGION: "europe-west4"
+
+options:
+  # Allows substitutions like ${_LOCATION}/${PROJECT_ID}/... to be composed
+  # from other substitutions.
+  dynamicSubstitutions: true
