@@ -2,7 +2,17 @@
 name = "emp-portal"
 version = "0.1.0"
 description = "Add your description here"
-requires-python = ">=3.14"
+requires-python = ">=3.10"
 dependencies = [
+    "fastapi>=0.115.0",
     "flask-sqlalchemy>=3.1.1",
+    "jinja2>=3.1.0",
+    "python-multipart>=0.0.9",
+    "uvicorn>=0.30.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.0",
+    "pytest>=8.0.0",
 ]
