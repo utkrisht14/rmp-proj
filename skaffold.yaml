@@ -1,0 +1,23 @@
+# Skaffold tells Google Cloud Deploy which manifest belongs to each target.
+#
+# Cloud Deploy uses the profile selected in deploy/clouddeploy.yaml:
+# - staging target uses the staging profile
+# - production target uses the production profile
+
+apiVersion: skaffold/v4beta7
+kind: Config
+metadata:
+  name: emp-portal
+profiles:
+  - name: staging
+    manifests:
+      rawYaml:
+        - deploy/cloudrun-staging.yaml
+
+  - name: production
+    manifests:
+      rawYaml:
+        - deploy/cloudrun-production.yaml
+
+deploy:
+  cloudrun: {}
