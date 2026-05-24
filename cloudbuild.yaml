@@ -146,8 +146,9 @@ steps:
 
   # On main, register or update the Cloud Deploy pipeline definition.
   #
-  # This expects deploy/clouddeploy.yaml to exist. If you are not using Cloud
-  # Deploy yet, remove this step and the create_release step below.
+  # deploy/clouddeploy.yaml contains PROJECT_ID as a learning-friendly
+  # placeholder, so this step renders a temporary copy with the real project ID
+  # before sending it to Google Cloud Deploy.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "register_pipeline"
     entrypoint: "bash"
@@ -155,8 +156,10 @@ steps:
       - "-c"
       - |
         if [[ "$BRANCH_NAME" == "main" ]]; then
+          sed "s/PROJECT_ID/${PROJECT_ID}/g" ./deploy/clouddeploy.yaml > /tmp/clouddeploy.yaml
+
           gcloud deploy apply \
-            --file=./deploy/clouddeploy.yaml \
+            --file=/tmp/clouddeploy.yaml \
             --region="${_DEPLOY_REGION}" \
             --project="$PROJECT_ID"
         else
@@ -165,6 +168,10 @@ steps:
     waitFor: ["push"]
 
   # On main, create a Cloud Deploy release from the image that was just pushed.
+  #
+  # Cloud Deploy reads skaffold.yaml, renders the staging and production Cloud
+  # Run manifests, replaces the app-image placeholder with _IMAGE_PATH, and
+  # automatically starts the first rollout to staging.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "create_release"
     entrypoint: "bash"
