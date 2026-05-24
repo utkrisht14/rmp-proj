@@ -1,0 +1,46 @@
+# Google Cloud Deploy configuration for the employee portal.
+#
+# This file defines the release path:
+#
+#   staging -> production
+#
+# Cloud Build builds and pushes the Docker image. Google Cloud Deploy then uses
+# this file, skaffold.yaml, and the Cloud Run service manifests to roll that same
+# image through each environment.
+
+apiVersion: deploy.cloud.google.com/v1
+kind: DeliveryPipeline
+metadata:
+  name: emp-portal-pipeline
+description: Employee portal delivery pipeline from staging to production.
+serialPipeline:
+  stages:
+    # First target. A new release automatically deploys here.
+    - targetId: staging
+      profiles: ["staging"]
+
+    # Second target. After staging is healthy, promote the release to production.
+    - targetId: production
+      profiles: ["production"]
+---
+apiVersion: deploy.cloud.google.com/v1
+kind: Target
+metadata:
+  name: staging
+description: Staging Cloud Run environment for validation before production.
+run:
+  # Cloud Build replaces PROJECT_ID with the real GCP project before applying
+  # this file. The location is the Cloud Run region.
+  location: projects/PROJECT_ID/locations/europe-west4
+---
+apiVersion: deploy.cloud.google.com/v1
+kind: Target
+metadata:
+  name: production
+description: Production Cloud Run environment for users.
+
+# Production requires manual approval after staging. This is useful for learning
+# because you can see the release pause before it moves to production.
+requireApproval: true
+run:
+  location: projects/PROJECT_ID/locations/europe-west4

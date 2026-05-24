@@ -1,0 +1,29 @@
+# Cloud Run service manifest for production.
+#
+# Cloud Deploy replaces the app-image placeholder when a release is created.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: emp-portal-production
+  labels:
+    app: emp-portal
+    environment: production
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "5"
+    spec:
+      containers:
+        - image: app-image
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ENVIRONMENT
+              value: production
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi

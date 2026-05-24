@@ -1,0 +1,29 @@
+# Cloud Run service manifest for staging.
+#
+# Cloud Deploy replaces the app-image placeholder when a release is created.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: emp-portal-staging
+  labels:
+    app: emp-portal
+    environment: staging
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "2"
+    spec:
+      containers:
+        - image: app-image
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ENVIRONMENT
+              value: staging
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
